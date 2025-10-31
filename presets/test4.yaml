@@ -1,0 +1,5 @@
+kind: game_setup_patch
+preset:
+  config_version: 1
+  rules: {}
+  shoe: {}
