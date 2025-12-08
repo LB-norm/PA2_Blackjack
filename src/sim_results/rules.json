@@ -1,0 +1,1 @@
+blackjack_payout='3:2' dealer_rule='S17' peek_rule='US' push_22=False double_allowed='any_two' double_after_split=True allow_splits=True max_splits=3 resplit_aces=False hit_split_aces=False allow_surrender='none' allow_insurance=False insurance_payout='2:1'

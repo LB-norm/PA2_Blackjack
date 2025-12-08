@@ -438,32 +438,71 @@ def run_blackjack_mc(
         update_q(first_visits, G)
 
     # ---------------------------- Policy extraction for grids ----------------------------
-    def best_action_for(cat: str, label: Any, up: Any) -> Tuple[str, float, int]:
-        # Which one do i want here?? hmmm 
-        # 1. Already saved first decision
-        key = (cat, label, up)
-        if key in first_decision_agg:
-            choices = first_decision_agg[key]
-            # pick action with highest mean EV; tie -> prefer in order P,D,R,S,H
-            pref = {'split':4,'double':3,'surrender':2,'stand':1,'hit':0}
-            best_a, (s, c) = max(choices.items(), key=lambda kv: (kv[1][0]/max(1,kv[1][1]), pref.get(kv[0], -1)))
-            return best_a, (s/max(1,c)), c
-        # 2. Synthesize a state key and use Q
-        print(f"using fallback for: {cat} {label}")
-        pr = None if cat != 'pair' else (label if label != '10' else 10)
-        usable = (cat == 'soft')
-        total = int(label) if cat != 'pair' else (22 if label=='A' else 2*int(label))  # total is not used strictly here
-        num_cards = 2   
-        after_split = False
-        splits_done = 0
-        split_aces_mode = False
-        sk = encode_state(total, usable, up, pr, num_cards, after_split, splits_done, split_aces_mode)
+    # def best_action_for(cat: str, label: Any, up: Any) -> Tuple[str, float, int]:
+    #     # Which one do i want here?? hmmm 
+    #     # 1. Already saved first decision
+    #     key = (cat, label, up)
+    #     if key in first_decision_agg:
+    #         choices = first_decision_agg[key]
+    #         # pick action with highest mean EV; tie -> prefer in order P,D,R,S,H
+    #         pref = {'split':4,'double':3,'surrender':2,'stand':1,'hit':0}
+    #         best_a, (s, c) = max(choices.items(), key=lambda kv: (kv[1][0]/max(1,kv[1][1]), pref.get(kv[0], -1)))
+    #         return best_a, (s/max(1,c)), c
+    #     # 2. Synthesize a state key and use Q
+    #     print(f"using fallback for: {cat} {label}")
+    #     pr = None if cat != 'pair' else (label if label != '10' else 10)
+    #     usable = (cat == 'soft')
+    #     total = int(label) if cat != 'pair' else (22 if label=='A' else 2*int(label))  # total is not used strictly here
+    #     num_cards = 2   
+    #     after_split = False
+    #     splits_done = 0
+    #     split_aces_mode = False
+    #     sk = encode_state(total, usable, up, pr, num_cards, after_split, splits_done, split_aces_mode)
+    #     qsa = Q.get(sk, {})
+    #     if not qsa:
+    #         return 'unknown state', 0.0, 0
+    #     best_a = max(qsa.keys(), key=lambda a: qsa[a])
+    #     return best_a, qsa[best_a], sum(N.get(sk, {}).values())
+    
+    def best_action_for(cat: str, label: Any, up: Any):
+        pr = None
+        usable = False
+        if cat == 'pair':
+            pr = label if label != '10' else 10
+            # total matters for can_double_now; this is fine:
+            total = 22 if str(label) == 'A' else 2 * int(label)
+        else:
+            total = int(label)
+            usable = (cat == 'soft')
+
+        sk = encode_state(
+            pl_total=total,
+            pl_usable_ace=usable,
+            d_up=up,
+            pr=pr,
+            num_cards=2,
+            after_split=False,
+            splits_done=0,
+            split_aces_mode=False
+        )
+
+        # initial_hand True because this is the first decision table
+        acts = allowed_actions(sk, initial_hand=True, resplittable_aces=False)
+
         qsa = Q.get(sk, {})
         if not qsa:
-            return 'unknown state', 0.0, 0
-        best_a = max(qsa.keys(), key=lambda a: qsa[a])
-        return best_a, qsa[best_a], sum(N.get(sk, {}).values())
-    
+            return 'unknown', 0.0, 0
+
+        # tie-break preference
+        pref = {'split':4,'double':3,'surrender':2,'stand':1,'hit':0}
+        best_a = max(
+            acts,
+            key=lambda a: (qsa.get(a, 0.0), pref.get(a, -1))
+        )
+
+        visits = sum(N.get(sk, {}).values())
+        return best_a, qsa.get(best_a, 0.0), visits
+
     up_cols = [2,3,4,5,6,7,8,9,10,'A']
     # Hard 5..21
     hard_grid = {row: {up: best_action_for('hard', row, up)[0] for up in up_cols} for row in range(5, 21)}
