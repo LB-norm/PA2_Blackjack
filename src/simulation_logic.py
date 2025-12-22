@@ -5,7 +5,7 @@ from datetime import datetime
 import os
 import pandas as pd
 from config_schema import Config
-from export_results import export_results, export_first_decision_agg
+from export_results import export_results
 
 # ---------------------------- Cards and hands ----------------------------
 RANKS = [2,3,4,5,6,7,8,9,10,'J','Q','K','A']         # infinite deck categories
@@ -111,10 +111,15 @@ def run_blackjack_mc(
     first_decision_agg: Dict[Tuple[str, Any, Any], Dict[str, List[float]]] = {}
 
     # helper: epsilon im späteren Verlauf variieren ist der Call
-    def get_epsilon_state(sk, c=100000.0):
-        n = sum(N.get(sk, {}).values())
-        return c / (c + n)
-
+    # def get_epsilon_state(sk, c=1000.0):
+    #     n = sum(N.get(sk, {}).values())
+    #     return c / (c + n)
+    
+    def get_epsilon_state(N_s, N0=1000.0, eps_max=0.3, eps_min=0.01):
+        N_s = sum(N.get(sk, {}).values())
+        e = N0 / (N0 + N_s)
+        return max(eps_min, min(eps_max, e))
+    
     # state encoder for Q
     def encode_state(pl_total: int, pl_usable_ace: bool, d_up: Any,
                      pr: Optional[Any], num_cards: int, after_split: bool,
@@ -505,18 +510,11 @@ def run_blackjack_mc(
     }
 
     if save_dir is not None:
-        export_results(save_dir, rules, result, up_cols)
+        export_results(save_dir, result, up_cols)
     return result
 
 def main(cfg, export_dir):
     if not cfg:
         cfg = Config()
     results = run_blackjack_mc(cfg, save_dir=export_dir)
-    first_decision_dict = results["first_decision_agg"]
-    os.makedirs(export_dir, exist_ok=True)
-    xlsx = os.path.join(
-        export_dir,
-        f"first_decision_agg_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    )
-    export_first_decision_agg(first_decision_dict, path=xlsx)
 

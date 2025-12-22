@@ -465,7 +465,8 @@ class PageGameSetup(QtWidgets.QWidget):
 
 class PageSimConsole(QtWidgets.QWidget):
     # default export folder: <this_file_dir>/sim_results
-    DEFAULT_EXPORT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "sim_results"))
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    DEFAULT_EXPORT_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, "sim_results"))
     
     def __init__(self, state):
         super().__init__()

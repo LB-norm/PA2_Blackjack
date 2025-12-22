@@ -1,7 +1,11 @@
-import pandas as pd
 import os
-from typing import Dict, Tuple, List, Optional, Any
+import json
+from datetime import datetime
+from typing import Dict, Any, List, Tuple
+
+import pandas as pd
 from pandas.io.formats.style import Styler
+
 
 _ACTION_COLORS = {
     "hit": "#FF0000",        # red
@@ -11,11 +15,12 @@ _ACTION_COLORS = {
     "surrender": "#BFBFBF",  # grey
 }
 
+
 def _style_actions(df: pd.DataFrame) -> Styler:
     def fmt(v):
         s = str(v).lower()
         if s == "blackjack":
-            return ""  # no color
+            return ""
         if s.startswith("double"):
             return f"background-color: {_ACTION_COLORS['double']}"
         if s.startswith("split"):
@@ -27,60 +32,40 @@ def _style_actions(df: pd.DataFrame) -> Styler:
         if s.startswith("hit"):
             return f"background-color: {_ACTION_COLORS['hit']}"
         return ""
+
     return (
         df.style
-          .applymap(fmt)
-          .set_properties(**{"text-align": "center"})
-          .set_table_styles([{"selector": "th", "props": [("text-align", "center")]}])
+        .applymap(fmt)
+        .set_properties(**{"text-align": "center"})
+        .set_table_styles([{"selector": "th", "props": [("text-align", "center")]}])
     )
 
-def export_results(save_dir, rules, results, up_cols):
-    hard_grid = results["hard_grid"]
-    soft_grid = results["soft_grid"]
-    pair_grid = results["pair_grid"]
-    first_decision_agg = results["first_decision_agg"]
-    Q = results["Q"]
-    N = results["N"]
 
-    os.makedirs(save_dir, exist_ok=True)
-    # Save params
-    with open(os.path.join(save_dir, "rules.json"), "w") as f:
-        f.write(str(rules))
+def _make_run_dir(base_dir: str, prefix: str = "run") -> str:
+    """
+    Creates base_dir/prefix_YYYYmmdd_HHMM (minute precision).
+    If it already exists, appends _01, _02, ...
+    """
+    os.makedirs(base_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    run_dir = os.path.join(base_dir, f"{prefix}_{stamp}")
 
-    # Save grids as xlsx
-    def write_grid_csv(name: str, grid: Dict, rows: List[Any]):
-        path = os.path.join(save_dir, f"{name}.xlsx")
-        df = pd.DataFrame.from_dict(grid, orient="index")[up_cols]
-        df.index.name = "player"
-        styler = _style_actions(df)
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            styler.to_excel(writer, sheet_name=name)
+    if not os.path.exists(run_dir):
+        os.makedirs(run_dir, exist_ok=False)
+        return run_dir
 
-    write_grid_csv("hard", hard_grid, list(range(5,22)))
-    write_grid_csv("soft", soft_grid, list(range(13,22)))
-    write_grid_csv("pairs", pair_grid, [2,3,4,5,6,7,8,9,10,'A'])
+    i = 1
+    while True:
+        candidate = f"{run_dir}_{i:02d}"
+        if not os.path.exists(candidate):
+            os.makedirs(candidate, exist_ok=False)
+            return candidate
+        i += 1
 
-    # Save first-decision EVs for visualization
-    with open(os.path.join(save_dir, "first_decision_ev.csv"), "w") as f:
-        f.write("category,player,dealer_up,action,mean_ev,count\n")
-        for (cat, lbl, up), acts in first_decision_agg.items():
-            for a, (s, c) in acts.items():
-                mean_ev = s / max(1, c)
-                f.write(f"{cat},{lbl},{up},{a},{mean_ev:.6f},{c}\n")
-
-    # Save a compact Q dump (only initial two-card states) for deeper analysis
-    with open(os.path.join(save_dir, "q_initial_states.csv"), "w") as f:
-        f.write("pl_total,usable_ace,dealer_up,pair_rank,num_cards,after_split,splits_done,split_aces,can_double,can_split,action,q,n\n")
-        for sk, row in Q.items():
-            (pl_total, usable_ace, d_up_s, pr_s, num_cards, after_split, splits_done, split_aces, can_d, can_spl) = sk
-            if num_cards != 2 or after_split:
-                continue
-            for a, qv in row.items():
-                n = N.get(sk, {}).get(a, 0)
-                f.write(f"{pl_total},{usable_ace},{d_up_s},{pr_s},{num_cards},{after_split},{splits_done},{split_aces},{can_d},{can_spl},{a},{qv:.6f},{n}\n")
-
-def export_first_decision_agg(first_decision_agg: Dict[Tuple[Any, Any, Any], Dict[str, List[float]]],
-                              path: str = "first_decision_stats.xlsx") -> None:
+def export_first_decision_agg(
+    first_decision_agg: Dict[Tuple[Any, Any, Any], Dict[str, List[float]]],
+    path: str = "first_decision_stats.xlsx",
+) -> None:
     """
     first_decision_agg structure:
         {
@@ -91,11 +76,11 @@ def export_first_decision_agg(first_decision_agg: Dict[Tuple[Any, Any, Any], Dic
             ...
         }
 
-    This writes an Excel file with:
+    Writes an Excel file with:
     - Sheet 'raw': one row per (state, action)
     - Sheet 'pivot_meanEV': one row per state, actions as columns with mean EV
+    - Sheet 'pivot_counts': one row per state, actions as columns with counts
     """
-
     rows = []
     for (cat, label, d_up), action_dict in first_decision_agg.items():
         for action, (s, c) in action_dict.items():
@@ -111,48 +96,87 @@ def export_first_decision_agg(first_decision_agg: Dict[Tuple[Any, Any, Any], Dic
             })
 
     if not rows:
-        # nothing to export
         return
 
     df = pd.DataFrame(rows)
 
-    # Pivot view: best for scanning strategy logic
     pivot_mean = df.pivot_table(
         index=["cat", "label", "dealer_up"],
         columns="action",
         values="mean_ev",
-        aggfunc="first"
+        aggfunc="first",
     )
 
-    # Optional: also show sample counts per action
     pivot_count = df.pivot_table(
         index=["cat", "label", "dealer_up"],
         columns="action",
         values="count",
-        aggfunc="first"
+        aggfunc="first",
     )
 
-    # Write to Excel with multiple sheets
+    # Ensure output directory exists
+    out_dir = os.path.dirname(path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    # Write to Excel with multiple sheets (openpyxl)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.sort_values(["cat", "label", "dealer_up", "action"]).to_excel(
-            writer,
-            sheet_name="raw",
-            index=False
+            writer, sheet_name="raw", index=False
         )
-
         pivot_mean.sort_index().to_excel(writer, sheet_name="pivot_meanEV")
         pivot_count.sort_index().to_excel(writer, sheet_name="pivot_counts")
 
-        # Optional formatting: autofit columns
-        for sheet_name, dataf in {
-            "raw": df,
-            "pivot_meanEV": pivot_mean.reset_index(),
-            "pivot_counts": pivot_count.reset_index(),
-        }.items():
-            worksheet = writer.sheets[sheet_name]
-            for i, col in enumerate(dataf.columns):
-                max_len = max(
-                    len(str(col)),
-                    *(len(str(v)) for v in dataf[col].astype(str))
-                )
-                worksheet.set_column(i, i, max_len + 2)
+def export_results(save_dir: str, result: Dict[str, Any], up_cols: List[Any] | None = None) -> str:
+    """
+    Writes all outputs into a fresh run folder inside save_dir.
+    Expects `result` to contain at least:
+        - hard_grid, soft_grid, pair_grid
+        - first_decision_agg
+        - Q, N
+        - rules (string or dict)
+
+    Returns the created run folder path.
+    """
+    if up_cols is None:
+        up_cols = [2, 3, 4, 5, 6, 7, 8, 9, 10, "A"]
+
+    run_dir = _make_run_dir(save_dir, prefix="run")
+
+    hard_grid = result["hard_grid"]
+    soft_grid = result["soft_grid"]
+    pair_grid = result["pair_grid"]
+    first_decision_agg = result["first_decision_agg"]
+    Q = result["Q"]
+    N = result["N"]
+    rules = result.get("rules", "")
+
+    # --- rules.json ---
+    rules_path = os.path.join(run_dir, "rules.json")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        # Store as JSON in a robust way (even if rules is already a string)
+        json.dump({"rules": rules}, f, indent=2, ensure_ascii=False, default=str)
+
+    # --- grids (.xlsx) ---
+    def write_grid_xlsx(name: str, grid: Dict[Any, Dict[Any, Any]], row_order: List[Any]) -> None:
+        path = os.path.join(run_dir, f"{name}.xlsx")
+        df = pd.DataFrame.from_dict(grid, orient="index").reindex(columns=up_cols)
+
+        # order rows if possible
+        df = df.reindex(row_order)
+
+        df.index.name = "player"
+        styler = _style_actions(df)
+
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            styler.to_excel(writer, sheet_name=name)
+
+    write_grid_xlsx("hard", hard_grid, list(range(5, 22)))
+    write_grid_xlsx("soft", soft_grid, list(range(13, 22)))
+    write_grid_xlsx("pairs", pair_grid, [str(x) for x in [2, 3, 4, 5, 6, 7, 8, 9, 10, "A"]])
+
+    # --- first_decision_ev.csv ---
+    first_decision_path = os.path.join(run_dir, "first_decision_stats.xlsx")
+    export_first_decision_agg(first_decision_agg, first_decision_path)
+    return run_dir
+
