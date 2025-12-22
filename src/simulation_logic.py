@@ -8,11 +8,11 @@ from config_schema import Config
 from export_results import export_results, export_first_decision_agg
 
 # ---------------------------- Cards and hands ----------------------------
-RANKS = [2,3,4,5,6,7,8,9,10,'A']         # infinite deck categories
-WEIGHTS = [1,1,1,1,1,1,1,1,4,1]          # per 52-card deck: each non-ten 4, tens 16
+RANKS = [2,3,4,5,6,7,8,9,10,'J','Q','K','A']         # infinite deck categories
+
 
 def draw_card(rng: random.Random):
-    return rng.choices(RANKS, weights=WEIGHTS, k=1)[0]
+    return rng.choices(RANKS, k=1)[0]
 
 def hand_value(cards):
     total = 0
@@ -22,7 +22,6 @@ def hand_value(cards):
             total += 11
             aces += 1
         else:
-            # allow ints or strings; map faces to 10 if present
             if isinstance(c, str) and c in {'J','Q','K','T'}:
                 v = 10
             else:
@@ -37,13 +36,12 @@ def is_blackjack(cards: List[Any]) -> bool:
     if len(cards) != 2:
         return False
     t, _ = hand_value(cards)
-    return t == 21 and ('A' in cards) and (10 in cards)
+    return t == 21 and ('A' in cards)
 
 def pair_rank(cards: List[Any]) -> Optional[Any]:
     if len(cards) != 2:
         return None
     a, b = cards
-    # Ten-value cards are all "10" in this abstraction already
     return a if a == b else None
 
 def bj_multiplier(rules: Any) -> float:
@@ -112,39 +110,31 @@ def run_blackjack_mc(
     # key: (category, player_label, dealer_up); values: {action: (sum_return, count)}
     first_decision_agg: Dict[Tuple[str, Any, Any], Dict[str, List[float]]] = {}
 
-    # helper: epsilon schedule
-    def get_epsilon_state(sk, c=500.0):
+    # helper: epsilon im späteren Verlauf variieren ist der Call
+    def get_epsilon_state(sk, c=100000.0):
         n = sum(N.get(sk, {}).values())
         return c / (c + n)
 
     # state encoder for Q
     def encode_state(pl_total: int, pl_usable_ace: bool, d_up: Any,
                      pr: Optional[Any], num_cards: int, after_split: bool,
-                     splits_done: int, split_aces_mode: bool) -> Tuple:
+                     splits_done: int) -> Tuple:
         can_d = can_double_now(pl_total, num_cards, after_split, rules)
         can_spl = (rules.allow_splits and (num_cards == 2) and (pr is not None)
                    and (splits_done < rules.max_splits))
         # If split aces and one-card rules applies, you cannot hit/double; resplit depends on rules.
         return (pl_total, int(pl_usable_ace), str(d_up),
                 str(pr) if pr is not None else '0',
-                num_cards, int(after_split), splits_done, int(split_aces_mode),
+                num_cards, int(after_split), splits_done,
                 int(can_d), int(can_spl))
 
     # allowed actions at this decision point
     def allowed_actions(state_key: Tuple, initial_hand: bool, resplittable_aces: bool) -> List[Action]:
-        (_, _, _, pr_s, num_cards, after_split_i, splits_done, split_aces_mode_i, can_d_i, can_spl_i) = state_key
+        (_, _, _, pr_s, num_cards, after_split_i, splits_done, can_d_i, can_spl_i) = state_key
         actions = []
-        split_aces_mode = bool(split_aces_mode_i)
         after_split = bool(after_split_i)
         can_d = bool(can_d_i)
         can_spl = bool(can_spl_i)
-
-        # Split-aces one-card rules: no actions except stand, unless resplitting aces is available.
-        if split_aces_mode:
-            if resplittable_aces:
-                actions.append('split')
-            actions.append('stand')
-            return actions
 
         # Base actions
         actions.extend(['hit', 'stand'])
@@ -180,7 +170,8 @@ def run_blackjack_mc(
             cnts = N.setdefault(sk, {})
             old = row.get(a, 0.0)
             n = cnts.get(a, 0) + 1
-            row[a] = old + (G - old) / n    #update step 
+            # row[a] = old + (G - old) / n    #update step 
+            row[a] = old + (G - old) * 0.01    #update step 
             cnts[a] = n
 
     # record first decision aggregate for grid, maybe not needed lol
@@ -270,12 +261,8 @@ def run_blackjack_mc(
             total, usable = hand_value(cards)
             pr = pair_rank(cards) if len(cards) == 2 else None
 
-            # Split-aces restriction: if this hand is from split aces, one-card only.
-            split_aces_mode = h['from_split_aces']
-
             # Determine if resplitting aces is currently possible
             resplittable_aces = (
-                split_aces_mode and
                 len(cards) == 2 and
                 pair_rank(cards) == 'A' and
                 h['splits_done'] < rules.max_splits and
@@ -289,38 +276,33 @@ def run_blackjack_mc(
                 pr=pr,
                 num_cards=len(cards),
                 after_split=h['after_split'],
-                splits_done=h['splits_done'],
-                split_aces_mode=split_aces_mode
+                splits_done=h['splits_done']
             )
 
             initial_hand = (len(cards) == 2 and not h['after_split'])
             acts = allowed_actions(sk, initial_hand=initial_hand, resplittable_aces=resplittable_aces)
 
-            # If split-aces one-card and not resplittable, force stand
-            if split_aces_mode and not resplittable_aces:
-                raise AssertionError("Split-Ace hand without RSA should be resolved already")
+            # Log first decision for grid aggregation (only once per episode, on the very first hand's first choice)
+            if not first_decision_logged and initial_hand:
+                first_decision_logged = True
+                # Choose action with epsilon-greedy but also record which category this first decision belongs to
+                category = ('pair' if pr is not None else ('soft' if usable else 'hard'))
+                label = (str(pr) if category == 'pair' else total)
+                # Choose action now to record; we also need to actually execute it, so reuse below
+                action = choose_action(sk, acts)
+                # Temporarily store to attach G at the end
+                first_decision_meta = (category, label, d_up, action)
+                # Also first-visit MC bookkeeping
+                first_visits.append((sk, action))
             else:
-                # Log first decision for grid aggregation (only once per episode, on the very first hand's first choice)
-                if not first_decision_logged and initial_hand:
-                    first_decision_logged = True
-                    # Choose action with epsilon-greedy but also record which category this first decision belongs to
-                    category = ('pair' if pr is not None else ('soft' if usable else 'hard'))
-                    label = (str(pr) if category == 'pair' else total)
-                    # Choose action now to record; we also need to actually execute it, so reuse below
-                    action = choose_action(sk, acts)
-                    # Temporarily store to attach G at the end
-                    first_decision_meta = (category, label, d_up, action)
-                    # Also first-visit MC bookkeeping
-                    first_visits.append((sk, action))
+                # Choose action and record first-visit if not seen in this episode
+                if h["after_split"]:
+                    modified_state= sk[:5] + (False, 0, False) + sk[8:]
+                    action = choose_action(modified_state, acts, after_split=True)
                 else:
-                    # Choose action and record first-visit if not seen in this episode
-                    if h["after_split"]:
-                        modified_state= sk[:5] + (False, 0, False) + sk[8:]
-                        action = choose_action(modified_state, acts, after_split=True)
-                    else:
-                        action = choose_action(sk, acts)
-                    if (sk, action) not in first_visits:
-                        first_visits.append((sk, action))
+                    action = choose_action(sk, acts)
+                if (sk, action) not in first_visits:
+                    first_visits.append((sk, action))
 
             # Execute action
             if action == 'surrender':
@@ -456,8 +438,7 @@ def run_blackjack_mc(
     #     num_cards = 2   
     #     after_split = False
     #     splits_done = 0
-    #     split_aces_mode = False
-    #     sk = encode_state(total, usable, up, pr, num_cards, after_split, splits_done, split_aces_mode)
+    #     sk = encode_state(total, usable, up, pr, num_cards, after_split, splits_done)
     #     qsa = Q.get(sk, {})
     #     if not qsa:
     #         return 'unknown state', 0.0, 0
@@ -482,8 +463,7 @@ def run_blackjack_mc(
             pr=pr,
             num_cards=2,
             after_split=False,
-            splits_done=0,
-            split_aces_mode=False
+            splits_done=0
         )
 
         # initial_hand True because this is the first decision table
