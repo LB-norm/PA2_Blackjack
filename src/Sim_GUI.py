@@ -73,7 +73,6 @@ class AppState(QtCore.QObject):
         self.config_changed.emit(cfg)
 
 # ---------- Pages ----------
-
 class PageGameSetup(QtWidgets.QWidget):
     """
     Mirrors config_schema.Rules + Shoe (ALL fields).

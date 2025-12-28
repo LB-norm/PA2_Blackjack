@@ -9,7 +9,7 @@ from export_results import export_results
 
 # ---------------------------- Cards and hands ----------------------------
 RANKS = [2,3,4,5,6,7,8,9,10,'J','Q','K','A']         # infinite deck categories
-
+TEN_RANKS = {10,'J','Q','K'}
 
 def draw_card(rng: random.Random):
     return rng.choices(RANKS, k=1)[0]
@@ -31,6 +31,14 @@ def hand_value(cards):
         total -= 10
         aces -= 1
     return total, aces > 0
+
+def canon_rank(x: Any) -> str:
+    return "10" if x in TEN_RANKS else str(x)
+
+def canon_pair_rank(pr: Optional[Any]) -> str:
+    if pr is None:
+        return None
+    return "10" if pr in TEN_RANKS else str(pr)
 
 def is_blackjack(cards: List[Any]) -> bool:
     if len(cards) != 2:
@@ -106,16 +114,12 @@ def run_blackjack_mc(
     Q: Dict[Tuple, Dict[Action, float]] = {}
     N: Dict[Tuple, Dict[Action, int]] = {}
 
-    # Aggregates for the *first decision only* to build strategy grids
-    # key: (category, player_label, dealer_up); values: {action: (sum_return, count)}
-    first_decision_agg: Dict[Tuple[str, Any, Any], Dict[str, List[float]]] = {}
-
     # helper: epsilon im späteren Verlauf variieren ist der Call
-    # def get_epsilon_state(sk, c=1000.0):
+    # def get_epsilon_state(sk, c=1000):
     #     n = sum(N.get(sk, {}).values())
     #     return c / (c + n)
     
-    def get_epsilon_state(N_s, N0=1000.0, eps_max=0.3, eps_min=0.01):
+    def get_epsilon_state(sk, N0=1000.0, eps_max=0.3, eps_min=0.1):
         N_s = sum(N.get(sk, {}).values())
         e = N0 / (N0 + N_s)
         return max(eps_min, min(eps_max, e))
@@ -128,8 +132,8 @@ def run_blackjack_mc(
         can_spl = (rules.allow_splits and (num_cards == 2) and (pr is not None)
                    and (splits_done < rules.max_splits))
         # If split aces and one-card rules applies, you cannot hit/double; resplit depends on rules.
-        return (pl_total, int(pl_usable_ace), str(d_up),
-                str(pr) if pr is not None else '0',
+        return (pl_total, int(pl_usable_ace), canon_rank(d_up),
+                canon_pair_rank(pr) if pr is not None else '0',
                 num_cards, int(after_split), splits_done,
                 int(can_d), int(can_spl))
 
@@ -158,7 +162,7 @@ def run_blackjack_mc(
             return acts[0]
         eps = get_epsilon_state(sk)
         if after_split:   #be greedy if after split
-            eps = 0
+            eps = min(get_epsilon_state(sk), 0.1)
         if rng.random() < eps:
             return rng.choice(acts)
         qsa = Q.get(sk, {})
@@ -175,16 +179,9 @@ def run_blackjack_mc(
             cnts = N.setdefault(sk, {})
             old = row.get(a, 0.0)
             n = cnts.get(a, 0) + 1
-            # row[a] = old + (G - old) / n    #update step 
-            row[a] = old + (G - old) * 0.01    #update step 
+            row[a] = old + (G - old) / n    #update step 
+            # row[a] = old + (G - old) * 0.01    #update step 
             cnts[a] = n
-
-    # record first decision aggregate for grid, maybe not needed lol
-    def record_first_decision(cat: str, label: Any, d_up: Any, action: str, G: float):
-        key = (cat, label, d_up)
-        bucket = first_decision_agg.setdefault(key, {})
-        s, c = bucket.get(action, [0.0, 0])
-        bucket[action] = [s + G, c + 1]
 
     # payout helper per hand
     def settle_hand(player_cards: List[Any], dealer_total: int, dealer_bj: bool,
@@ -221,7 +218,7 @@ def run_blackjack_mc(
         # Check immediate naturals and peek logic for surrender-late resolution
         player_natural = is_blackjack(p_cards)
         dealer_is_bj = is_blackjack([d_up, d_hole])
-        peekable = d_up in (10, "A")
+        peekable = (d_up == 'A') or (d_up in TEN_RANKS)
 
         # Prepare player hands queue
         hands = [{
@@ -295,14 +292,12 @@ def run_blackjack_mc(
                 label = (str(pr) if category == 'pair' else total)
                 # Choose action now to record; we also need to actually execute it, so reuse below
                 action = choose_action(sk, acts)
-                # Temporarily store to attach G at the end
-                first_decision_meta = (category, label, d_up, action)
                 # Also first-visit MC bookkeeping
                 first_visits.append((sk, action))
             else:
                 # Choose action and record first-visit if not seen in this episode
                 if h["after_split"]:
-                    modified_state= sk[:5] + (False, 0, False) + sk[8:]
+                    modified_state= sk[:5] + (0, 0) + sk[7:]
                     action = choose_action(modified_state, acts, after_split=True)
                 else:
                     action = choose_action(sk, acts)
@@ -415,48 +410,16 @@ def run_blackjack_mc(
                     natural_already_paid=False
                 )
 
-        # First-decision logging for grid
-        if 'first_decision_meta' in locals():
-            cat, label, up, a0 = first_decision_meta
-            record_first_decision(cat, label, up, a0, G)
-            del first_decision_meta  # avoid bleed to next episode
-
         # MC update
         update_q(first_visits, G)
 
     # ---------------------------- Policy extraction for grids ----------------------------
-    # def best_action_for(cat: str, label: Any, up: Any) -> Tuple[str, float, int]:
-    #     # Which one do i want here?? hmmm 
-    #     # 1. Already saved first decision
-    #     key = (cat, label, up)
-    #     if key in first_decision_agg:
-    #         choices = first_decision_agg[key]
-    #         # pick action with highest mean EV; tie -> prefer in order P,D,R,S,H
-    #         pref = {'split':4,'double':3,'surrender':2,'stand':1,'hit':0}
-    #         best_a, (s, c) = max(choices.items(), key=lambda kv: (kv[1][0]/max(1,kv[1][1]), pref.get(kv[0], -1)))
-    #         return best_a, (s/max(1,c)), c
-    #     # 2. Synthesize a state key and use Q
-    #     print(f"using fallback for: {cat} {label}")
-    #     pr = None if cat != 'pair' else (label if label != '10' else 10)
-    #     usable = (cat == 'soft')
-    #     total = int(label) if cat != 'pair' else (22 if label=='A' else 2*int(label))  # total is not used strictly here
-    #     num_cards = 2   
-    #     after_split = False
-    #     splits_done = 0
-    #     sk = encode_state(total, usable, up, pr, num_cards, after_split, splits_done)
-    #     qsa = Q.get(sk, {})
-    #     if not qsa:
-    #         return 'unknown state', 0.0, 0
-    #     best_a = max(qsa.keys(), key=lambda a: qsa[a])
-    #     return best_a, qsa[best_a], sum(N.get(sk, {}).values())
-    
     def best_action_for(cat: str, label: Any, up: Any):
         pr = None
-        usable = False
         if cat == 'pair':
             pr = label if label != '10' else 10
             # total matters for can_double_now; this is fine:
-            total = 22 if str(label) == 'A' else 2 * int(label)
+            total, usable = hand_value([pr, pr])
         else:
             total = int(label)
             usable = (cat == 'soft')
@@ -505,8 +468,7 @@ def run_blackjack_mc(
         "hard_grid": hard_grid,
         "soft_grid": soft_grid,
         "pair_grid": pair_grid,
-        "first_decision_agg": first_decision_agg,
-        "rules": str(rules),
+        "rules": str(rules)
     }
 
     if save_dir is not None:
