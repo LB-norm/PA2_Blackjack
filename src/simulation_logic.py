@@ -418,7 +418,6 @@ def run_blackjack_mc(
         pr = None
         if cat == 'pair':
             pr = label if label != '10' else 10
-            # total matters for can_double_now; this is fine:
             total, usable = hand_value([pr, pr])
         else:
             total = int(label)
@@ -468,9 +467,9 @@ def run_blackjack_mc(
         "hard_grid": hard_grid,
         "soft_grid": soft_grid,
         "pair_grid": pair_grid,
-        "rules": str(rules)
+        "rules": rules
     }
-
+    
     if save_dir is not None:
         export_results(save_dir, result, up_cols)
     return result
