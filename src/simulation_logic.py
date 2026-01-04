@@ -7,7 +7,7 @@ import pandas as pd
 from config_schema import Config
 from export_results import export_results
 from simulation_helpers import *
-
+from simulation_eval import make_log_checkpoints, evaluate_greedy_policy_metrics
 
 Action = str  # 'hit','stand','double','split','surrender'
 
@@ -29,11 +29,6 @@ def run_blackjack_mc(
     # Q(s,a) and counts; state is a compact tuple
     Q: Dict[Tuple, Dict[Action, float]] = {}
     N: Dict[Tuple, Dict[Action, int]] = {}
-
-    # helper: epsilon im späteren Verlauf variieren ist der Call
-    # def get_epsilon_state(sk, c=1000):
-    #     n = sum(N.get(sk, {}).values())
-    #     return c / (c + n)
     
     def get_epsilon_state(sk, N0=1000.0, eps_max=0.3, eps_min=0.1):
         N_s = sum(N.get(sk, {}).values())
@@ -87,7 +82,6 @@ def run_blackjack_mc(
         tie_idxs = [i for i,v in enumerate(vals) if v == m]
         return acts[rng.choice(tie_idxs)]
 
-    # update Q first-visit
     def update_q(first_visits: List[Tuple[Tuple, Action]], G: float):
         # Running average per (s,a)
         for sk, a in first_visits:
@@ -96,8 +90,12 @@ def run_blackjack_mc(
             old = row.get(a, 0.0)
             n = cnts.get(a, 0) + 1
             row[a] = old + (G - old) / n    #update step 
-            # row[a] = old + (G - old) * 0.01    #update step 
             cnts[a] = n
+
+    checkpoints = make_log_checkpoints(episodes, start=10_000, num=50)
+    cp_idx = 0
+    eval_history = []
+    prev_policy_map = None
 
     # episode loop
     eps_count = 0
@@ -306,6 +304,19 @@ def run_blackjack_mc(
 
         # MC update
         update_q(first_visits, G)
+        if cp_idx < len(checkpoints) and eps_count == checkpoints[cp_idx]:
+            m, prev_policy_map = evaluate_greedy_policy_metrics(
+                Q=Q,
+                rules=rules,
+                encode_state=encode_state,
+                allowed_actions=allowed_actions,
+                eval_episodes=200_000,              
+                eval_seed=seed + 10_000_000 + eps_count,
+                prev_policy_map=prev_policy_map
+            )
+            m["train_episode"] = eps_count
+            eval_history.append(m)
+            cp_idx += 1
 
     # ---------------------------- Policy extraction for grids ----------------------------
     def best_action_for(cat: str, label: Any, up: Any):
@@ -363,7 +374,7 @@ def run_blackjack_mc(
         "pair_grid": pair_grid,
         "rules": rules
     }
-    
+    print(eval_history)
     if save_dir is not None:
         export_results(save_dir, result, up_cols)
     return result
