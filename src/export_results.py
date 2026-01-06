@@ -63,6 +63,88 @@ def _make_run_dir(base_dir: str, prefix: str = "run") -> str:
             return candidate
         i += 1
 
+def export_eval_history_xlsx(
+    results: Dict[str, Any],
+    save_path: str,
+    *,
+    sheet_name: str = "eval_history",
+    index: bool = False,
+) -> str:
+    """
+    Export results["eval_history"] to an .xlsx file.
+
+    - Each evaluation dict becomes one row.
+    - Columns are the union of all keys across eval_history entries.
+    - Missing keys are left empty (NaN).
+
+    Parameters
+    ----------
+    results : dict
+        Must contain results["eval_history"] as a list[dict].
+    save_path : str
+        Output .xlsx path (directory will be created if needed).
+    sheet_name : str
+        Excel sheet name.
+    index : bool
+        Whether to write the dataframe index.
+
+    Returns
+    -------
+    str
+        The absolute path of the written file.
+    """
+    eval_history = results.get("eval_history", None)
+    if not eval_history:
+        raise ValueError("results does not contain a non-empty 'eval_history' list.")
+
+    if not isinstance(eval_history, list) or not all(isinstance(x, dict) for x in eval_history):
+        raise TypeError("results['eval_history'] must be a list of dicts.")
+
+    # Build table (union of keys across entries)
+    df = pd.DataFrame(eval_history)
+
+    # Optional: move commonly-used columns to front if present
+    preferred_order = [
+        "train_episode",
+        "eval_episodes",
+        "mean_return",
+        "stderr_return",
+        "flip_rate",
+        "flip_denom",
+        "policy_states_total",
+        "policy_states_covered",
+    ]
+    front = [c for c in preferred_order if c in df.columns]
+    rest = [c for c in df.columns if c not in front]
+    df = df[front + rest]
+
+    # Ensure output directory exists
+    out_dir = os.path.dirname(save_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    # Write
+    with pd.ExcelWriter(save_path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=index)
+
+        # Basic usability tweaks (freeze header row, auto-filter)
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        # Auto-fit column widths (simple heuristic)
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = col_cells[0].column_letter
+            for cell in col_cells:
+                v = cell.value
+                if v is None:
+                    continue
+                max_len = max(max_len, len(str(v)))
+            ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 50)
+
+    return os.path.abspath(save_path)
+
 def export_results(save_dir: str, result: Dict[str, Any], up_cols: List[Any] | None = None) -> str:
     """
     Writes all outputs into a fresh run folder inside save_dir.
@@ -110,7 +192,8 @@ def export_results(save_dir: str, result: Dict[str, Any], up_cols: List[Any] | N
     write_grid_xlsx("hard", hard_grid, list(range(5, 22)))
     write_grid_xlsx("soft", soft_grid, list(range(13, 22)))
     write_grid_xlsx("pairs", pair_grid, [str(x) for x in [2, 3, 4, 5, 6, 7, 8, 9, 10, "A"]])
-    export_initial_decision_qn_tables(save_dir, Q, N, rules, up_cols=up_cols)
+    export_initial_decision_qn_tables(run_dir, Q, N, rules, up_cols=up_cols)
+    export_eval_history_xlsx(results=result, save_path=os.path.join(run_dir, "eval_history.xlsx"))
     return run_dir
 
 def export_initial_decision_qn_tables(

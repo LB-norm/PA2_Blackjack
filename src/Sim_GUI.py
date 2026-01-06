@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 from config_schema import Config, Rules, Shoe
@@ -7,8 +8,32 @@ from PyQt5.QtGui import QDesktopServices, QIntValidator
 from PyQt5.QtCore import QUrl
 from preset_logic import apply_game_setup_preset, save_game_setup_preset_as, overwrite_game_setup_preset, reset_rules_shoe_to_defaults
 import simulation_logic
-# ---------- Reusable building blocks ----------
+import pyqtgraph as pg
 
+class SimulationWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)   # emits results (or None)
+    error = QtCore.pyqtSignal(str)
+    eval_update = QtCore.pyqtSignal(dict)
+
+    def __init__(self, cfg, export_dir: str):
+        super().__init__()
+        self.cfg = cfg
+        self.export_dir = export_dir
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            results = simulation_logic.main(
+                self.cfg,
+                self.export_dir,
+                eval_hook=self.eval_update.emit  # hook -> signal
+            )
+
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+# ---------- Reusable building blocks ----------
 class SectionTitle(QtWidgets.QLabel):
     def __init__(self, text):
         super().__init__(text)
@@ -499,6 +524,9 @@ class PageSimConsole(QtWidgets.QWidget):
         self.seed_edit.setMaximumWidth(180)
         pl.addWidget(self.seed_edit)
         pl.addStretch(1)
+
+        start_btn = QtWidgets.QPushButton("Start")
+        pl.addWidget(start_btn)
         outer.addWidget(params)
 
         # Prefill from cfg or defaults
@@ -506,18 +534,6 @@ class PageSimConsole(QtWidgets.QWidget):
         self.seed_edit.setText("" if self._cfg.simulation.seed is None
                                else str(int(self._cfg.simulation.seed)))
 
-        # --- Controls ---
-        ctrl = QtWidgets.QGroupBox("Controls")
-        cl = QtWidgets.QHBoxLayout(ctrl)
-        start_btn = QtWidgets.QPushButton("Start")
-        pause_btn = QtWidgets.QPushButton("Pause")
-        stop_btn  = QtWidgets.QPushButton("Stop")
-        cl.addWidget(start_btn); cl.addWidget(pause_btn); cl.addWidget(stop_btn)
-        cl.addSpacing(12)
-        cl.addWidget(QtWidgets.QLabel("Concurrent workers:"))
-        workers = QtWidgets.QSpinBox(); workers.setRange(1, 64); workers.setValue(4)
-        cl.addWidget(workers); cl.addStretch(1)
-        outer.addWidget(ctrl)
 
         # --- Result export ---
         export = QtWidgets.QGroupBox("Result export")
@@ -536,25 +552,44 @@ class PageSimConsole(QtWidgets.QWidget):
         open_btn.clicked.connect(self._open_export_dir)
         start_btn.clicked.connect(self.start_sim)
 
-        # --- Progress ---
-        prog = QtWidgets.QGroupBox("Progress")
-        gl = QtWidgets.QGridLayout(prog)
-        gl.addWidget(QtWidgets.QLabel("Overall:"), 0, 0)
-        overall = QtWidgets.QProgressBar(); overall.setValue(0)
-        gl.addWidget(overall, 0, 1)
-        gl.addWidget(QtWidgets.QLabel("Hands/sec:"), 1, 0); gl.addWidget(pill("—"), 1, 1)
-        gl.addWidget(QtWidgets.QLabel("EV/100 (running):"), 2, 0); gl.addWidget(pill("—"), 2, 1)
-        gl.addWidget(QtWidgets.QLabel("95% CI width:"), 3, 0); gl.addWidget(pill("—"), 3, 1)
-        outer.addWidget(prog)
+        # --- Threading ---
+        self._sim_thread = None
+        self._sim_worker = None 
 
-        # --- Log ---
-        log = QtWidgets.QGroupBox("Log")
-        ll = QtWidgets.QVBoxLayout(log)
-        t = QtWidgets.QPlainTextEdit(); t.setReadOnly(True)
-        t.setPlaceholderText("[events will appear here]")
-        ll.addWidget(t)
-        outer.addWidget(log)
-        outer.addStretch(1)
+        # --- Live plots ---
+        plots = QtWidgets.QGroupBox("Live evaluation (checkpoints)")
+        pl_lay = QtWidgets.QVBoxLayout(plots)
+
+        self.ev_plot = pg.PlotWidget(title="Greedy mean return vs training episode")
+        self.ev_plot.setLabel("bottom", "train_episode")
+        self.ev_plot.setLabel("left", "mean_return")
+        self.ev_curve = self.ev_plot.plot([], [])
+
+        self.flip_plot = pg.PlotWidget(title="Policy flip rate vs training episode")
+        self.flip_plot.setLabel("bottom", "train_episode")
+        self.flip_plot.setLabel("left", "flip_rate")
+        self.flip_curve = self.flip_plot.plot([], [])
+
+        # Grid on
+        self.ev_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.flip_plot.showGrid(x=True, y=True, alpha=0.3)
+
+        # Fixed y-ranges
+        self.ev_plot.setYRange(-0.1, 0.0, padding=0.0)
+        self.flip_plot.setYRange(0.0, 0.1, padding=0.0)
+
+        # Optional: prevent auto-ranging from overriding your fixed y-range
+        self.ev_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+        self.flip_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+        
+        pl_lay.addWidget(self.ev_plot)
+        pl_lay.addWidget(self.flip_plot)
+        outer.addWidget(plots)
+
+        # data buffers
+        self._x_eps = []
+        self._y_ev = []
+        self._y_flip = []
 
     def _on_cfg(self, cfg):
         self._cfg = cfg
@@ -581,7 +616,6 @@ class PageSimConsole(QtWidgets.QWidget):
         os.makedirs(path, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    # --- cfg IO for episodes/seed ---
     def _read_episodes_from_cfg(self, cfg) -> int:
         try:
             if hasattr(cfg, "simulation") and hasattr(cfg.simulation, "episodes"):
@@ -616,8 +650,54 @@ class PageSimConsole(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    # --- Threading helpers ---        
+    def _clear_sim_refs(self):
+        self._sim_thread = None
+        self._sim_worker = None
+
+    def _on_sim_finished(self, results):
+        if hasattr(self, "_log"):
+            self._log.appendPlainText("Simulation finished.")
+
+    def _on_sim_error(self, msg: str):
+        if hasattr(self, "_log"):
+            self._log.appendPlainText(f"Simulation error: {msg}")
+        QtWidgets.QMessageBox.critical(self, "Simulation error", msg)
+
+    def _on_eval_update(self, m: dict):
+        # m is one row of eval_history, e.g. {"train_episode":..., "mean_return":..., "flip_rate":...}
+        ep = m.get("train_episode", None)
+        ev = m.get("mean_return", None)
+        fr = m.get("flip_rate", None)
+
+        if ep is None:
+            return
+
+        self._x_eps.append(ep)
+        if ev is not None:
+            self._y_ev.append(ev)
+            self.ev_curve.setData(self._x_eps, self._y_ev)
+
+        if fr is not None:
+            if len(self._y_flip) < len(self._x_eps) - 1:
+                while len(self._y_flip) < len(self._x_eps) - 1:
+                    self._y_flip.append(math.nan)
+            self._y_flip.append(fr)
+            self.flip_curve.setData(self._x_eps, self._y_flip)
+
+        if hasattr(self, "_log"):
+            self._log.appendPlainText(
+                f"[eval] ep={ep} mean_return={ev} flip_rate={fr}"
+            )
+
     # --- simulation start ---
     def start_sim(self):
+        self._x_eps.clear()
+        self._y_ev.clear()
+        self._y_flip.clear()
+        self.ev_curve.setData([], [])
+        self.flip_curve.setData([], [])
+        
         cfg = self._cfg.model_copy(deep=True)
 
         # parameters -> cfg.simulation
@@ -633,7 +713,27 @@ class PageSimConsole(QtWidgets.QWidget):
         elif hasattr(cfg, "output_dir"):
             cfg.output_dir = export_dir
 
-        simulation_logic.main(cfg, export_dir)
+        # --- start simulation in background thread ---
+        if self._sim_thread is not None:
+            QtWidgets.QMessageBox.information(self, "Simulation", "Simulation already running.")
+            return
+
+        self._sim_thread = QtCore.QThread(self)
+        self._sim_worker = SimulationWorker(cfg, export_dir)
+        self._sim_worker.moveToThread(self._sim_thread)
+
+        self._sim_thread.started.connect(self._sim_worker.run)
+        self._sim_worker.eval_update.connect(self._on_eval_update)
+        self._sim_worker.finished.connect(self._on_sim_finished)
+        self._sim_worker.error.connect(self._on_sim_error)
+
+        # cleanup
+        self._sim_worker.finished.connect(self._sim_thread.quit)
+        self._sim_worker.error.connect(self._sim_thread.quit)
+        self._sim_thread.finished.connect(self._sim_thread.deleteLater)
+        self._sim_thread.finished.connect(self._clear_sim_refs)
+
+        self._sim_thread.start()
 
 
 # ---------- Main Window ----------

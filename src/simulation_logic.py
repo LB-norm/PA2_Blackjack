@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Tuple, List, Optional, Any
+from typing import Dict, Tuple, List, Optional, Any, Callable
 import random
 from datetime import datetime
 import os
@@ -14,6 +14,7 @@ Action = str  # 'hit','stand','double','split','surrender'
 def run_blackjack_mc(
     config,
     save_dir: Optional[str] = None,
+    eval_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Monte-Carlo control for infinite-deck blackjack. Returns learned Q, visit counts,
@@ -92,7 +93,8 @@ def run_blackjack_mc(
             row[a] = old + (G - old) / n    #update step 
             cnts[a] = n
 
-    checkpoints = make_log_checkpoints(episodes, start=10_000, num=50)
+    checkpoints = make_log_checkpoints(episodes, start=10_000, num=100)
+    print(checkpoints)
     cp_idx = 0
     eval_history = []
     prev_policy_map = None
@@ -304,7 +306,8 @@ def run_blackjack_mc(
 
         # MC update
         update_q(first_visits, G)
-        if cp_idx < len(checkpoints) and eps_count == checkpoints[cp_idx]:
+
+        if cp_idx < len(checkpoints) and eps_count >= checkpoints[cp_idx]:
             m, prev_policy_map = evaluate_greedy_policy_metrics(
                 Q=Q,
                 rules=rules,
@@ -316,6 +319,10 @@ def run_blackjack_mc(
             )
             m["train_episode"] = eps_count
             eval_history.append(m)
+
+            if eval_hook is not None:
+                eval_hook(m)    #GUI update signal
+
             cp_idx += 1
 
     # ---------------------------- Policy extraction for grids ----------------------------
@@ -372,15 +379,17 @@ def run_blackjack_mc(
         "hard_grid": hard_grid,
         "soft_grid": soft_grid,
         "pair_grid": pair_grid,
-        "rules": rules
+        "rules": rules,
+        "eval_history": eval_history,
     }
-    print(eval_history)
+
     if save_dir is not None:
         export_results(save_dir, result, up_cols)
     return result
 
-def main(cfg, export_dir):
+def main(cfg, export_dir, eval_hook=None):
     if not cfg:
         cfg = Config()
-    results = run_blackjack_mc(cfg, save_dir=export_dir)
+    results = run_blackjack_mc(cfg, save_dir=export_dir, eval_hook=eval_hook)
+    return results
 
