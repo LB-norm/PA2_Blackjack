@@ -1,0 +1,252 @@
+from __future__ import annotations
+import math
+from typing import Optional, Sequence
+import pandas as pd
+import plotly.graph_objects as go
+import numpy as np
+
+def _nice_log_ticks(x_min: float, x_max: float) -> list[int]:
+    """1-2-5 log ticks between x_min and x_max (inclusive)."""
+    if x_min <= 0 or x_max <= 0:
+        return []
+    p_min = int(math.floor(math.log10(x_min)))
+    p_max = int(math.ceil(math.log10(x_max)))
+    ticks: list[int] = []
+    for p in range(p_min, p_max + 1):
+        for m in (1, 2, 5):
+            v = int(m * (10 ** p))
+            if x_min <= v <= x_max:
+                ticks.append(v)
+    return sorted(set(ticks))
+
+
+def _fmt_si(n: float) -> str:
+    """Format numbers like 10000 -> 10k, 1000000 -> 1M."""
+    n = float(n)
+    if n >= 1e9:
+        v = n / 1e9
+        return f"{v:g}B" if v % 1 else f"{int(v)}B"
+    if n >= 1e6:
+        v = n / 1e6
+        return f"{v:g}M" if v % 1 else f"{int(v)}M"
+    if n >= 1e3:
+        v = n / 1e3
+        return f"{v:g}k" if v % 1 else f"{int(v)}k"
+    return str(int(n))
+
+
+def plot_eval_return(
+    eval_history_xlsx_path: str,
+    *,
+    title: str = "Greedy mean return vs training episode",
+    show_ci: bool = True,
+    ci_z: float = 1.96,  # 95% CI if stderr_return is present
+) -> go.Figure:
+    """
+    Reads eval_history from an xlsx file and plots mean_return (%) over train_episode.
+    Uses a log-scaled x-axis with 1-2-5 ticks to match log-spaced checkpoints.
+    """
+    df = pd.read_excel(eval_history_xlsx_path).copy()
+    if "train_episode" not in df or "mean_return" not in df:
+        raise ValueError("Expected columns: 'train_episode' and 'mean_return'.")
+
+    df = df.sort_values("train_episode")
+    x = df["train_episode"].astype(float).to_numpy()
+    y = (df["mean_return"].astype(float) * 100.0).to_numpy()  # percent
+
+    tickvals = _nice_log_ticks(float(x.min()), float(x.max()))
+    ticktext = [_fmt_si(v) for v in tickvals]
+
+    fig = go.Figure()
+
+    # Optional CI band (if stderr_return exists)
+    if show_ci and "stderr_return" in df:
+        se = df["stderr_return"].astype(float).to_numpy() * 100.0
+        ci = ci_z * se
+
+        fig.add_trace(go.Scatter(
+            x=x, y=y + ci,
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+            name="CI upper",
+        ))
+        fig.add_trace(go.Scatter(
+            x=x, y=y - ci,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            name=f"95% CI",
+            hoverinfo="skip",
+            fillcolor="rgba(255,0,0,0.2)",
+        ))
+
+    fig.add_trace(go.Scatter(
+        x=x, y=y,
+        mode="lines+markers",
+        name="Mean EV",
+        hovertemplate="episode=%{x:.0f}<br>EV=%{y:.3f}%<extra></extra>",
+    ))
+
+    target = -0.43286  # in percent units (since y is already %)
+    target_label = f"Reference ({target:.3f}%)"
+
+    fig.add_trace(go.Scatter(
+        x=[x.min(), x.max()],
+        y=[target, target],
+        mode="lines",
+        name=target_label,
+        line=dict(dash="dash", width=1, color="blue"),
+        hovertemplate=f"Target: {target:.3f}%<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Training episode (log scale)",
+        yaxis_title="Mean return (%)",
+        margin=dict(l=60, r=30, t=60, b=55),
+        legend=dict(orientation="v", yanchor="bottom", y=0.1, xanchor="right", x=0.99, borderwidth=1),
+    )
+
+    fig.update_xaxes(
+        type="log",
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=ticktext,
+    )
+
+    fig.update_yaxes(
+        ticksuffix="%",
+        zeroline=True,
+        zerolinewidth=1,
+    )
+
+    # Optional zero line (break-even)
+    fig.show()
+    return fig
+
+def _bar_widths_for_log_x(x: np.ndarray, frac_of_median_spacing: float = 0.70) -> list[float]:
+    """
+    Plotly bar width is specified in x-data units (linear), which shrinks visually on a log x-axis.
+    This computes widths so that bars have ~constant width in log-space.
+
+    Width is chosen as a fraction of the median log10 spacing between consecutive x-values.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[x > 0]
+    if x.size < 2:
+        return [0.0] * int(x.size)
+
+    logx = np.log10(np.sort(x))
+    d = np.diff(logx)
+    d = d[np.isfinite(d) & (d > 0)]
+    if d.size == 0:
+        # fallback: 5% of x
+        return (0.05 * x).tolist()
+
+    delta = float(np.median(d) * frac_of_median_spacing)  # desired full bar width in log10-units
+    r = 10 ** delta
+
+    # symmetric bar around x: log10(x+w/2) - log10(x-w/2) = delta  => w = 2x*(r-1)/(r+1)
+    widths = 2.0 * x * (r - 1.0) / (r + 1.0)
+    return widths.tolist()
+
+def plot_eval_flip_rate_with_abs_flips(
+    eval_history_xlsx_path: str,
+    *,
+    title: str = "Policy flip rate & number of flips vs training episode",
+    n_states: int = 330,
+    bar_width_frac: float = 0.70,
+) -> go.Figure:
+    """
+    Line: flip_rate (%) over train_episode (log-x).
+    Bars (y2): absolute flips. Uses df['flips'] if present, else derives from flip_rate * denom/state-count.
+
+    Bars are given widths computed to be ~constant in log-x space so they don't vanish at large episodes.
+    """
+    df = pd.read_excel(eval_history_xlsx_path).copy()
+    if "train_episode" not in df or "flip_rate" not in df:
+        raise ValueError("Expected columns: 'train_episode' and 'flip_rate'.")
+
+    df = df.sort_values("train_episode")
+    df = df[df["flip_rate"].notna()].copy()
+    if df.empty:
+        raise ValueError("No non-null flip_rate values found.")
+
+    x = df["train_episode"].astype(float).to_numpy()
+    flip_rate = df["flip_rate"].astype(float).to_numpy()
+    flip_pct = flip_rate * 100.0
+
+    # Prefer exact flips if you exported it; else derive
+    if "flips" in df.columns and df["flips"].notna().any():
+        abs_flips = df["flips"].fillna(0).astype(int).to_list()
+        denom_for_title = int(df["flip_denom"].dropna().iloc[-1]) if "flip_denom" in df.columns and df["flip_denom"].notna().any() else None
+    elif "flip_denom" in df.columns and df["flip_denom"].notna().any():
+        denom = df["flip_denom"].astype(float).to_numpy()
+        abs_flips = [int(round(fr * d)) for fr, d in zip(flip_rate, denom)]
+        denom_for_title = int(np.nanmax(denom))
+    else:
+        abs_flips = [int(round(fr * n_states)) for fr in flip_rate]
+        denom_for_title = n_states
+
+    widths = _bar_widths_for_log_x(x, frac_of_median_spacing=bar_width_frac)
+
+    tickvals = _nice_log_ticks(float(x.min()), float(x.max()))
+    ticktext = [_fmt_si(v) for v in tickvals]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=x,
+        y=abs_flips,
+        width=widths,          # key change
+        name="Absolute flips",
+        opacity=0.55,
+        yaxis="y2",
+        hovertemplate="episode=%{x:.0f}<br>abs_flips=%{y}<extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x,
+        y=flip_pct,
+        mode="lines+markers",
+        name="Flip rate",
+        hovertemplate="episode=%{x:.0f}<br>flip_rate=%{y:.3f}%<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Training episode (log scale)",
+        yaxis=dict(
+            title="Flip rate (%)",
+            ticksuffix="%",
+            rangemode="tozero",
+            zeroline=True,
+            zerolinewidth=1,
+        ),
+        yaxis2=dict(
+            title=f"Absolute flips (out of {denom_for_title})" if denom_for_title else "Absolute flips",
+            overlaying="y",
+            side="right",
+            rangemode="tozero",
+            showgrid=False,
+        ),
+        barmode="overlay",
+        margin=dict(l=70, r=80, t=60, b=55),
+        legend=dict(orientation="v", yanchor="bottom", y=0.9, xanchor="right", x=0.99, borderwidth=1),
+    )
+
+    fig.update_xaxes(
+        type="log",
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=ticktext,
+    )
+    fig.show()
+    return fig
+
+if __name__ == "__main__":
+    eval_history_path = r"sim_results\run_20260106_1651\eval_history.xlsx"
+    return_plot = plot_eval_return(eval_history_path)
+    policy_flip_plot = plot_eval_flip_rate_with_abs_flips(eval_history_path)
