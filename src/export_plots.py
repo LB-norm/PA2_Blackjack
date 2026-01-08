@@ -246,7 +246,161 @@ def plot_eval_flip_rate_with_abs_flips(
     fig.show()
     return fig
 
+def plot_state_values(
+    xlsx_path: str,
+    *,
+    sheet_name: str = "state_best",
+    show: bool = True,
+) -> Dict[str, go.Figure]:
+    """
+    Reads the `state_best` worksheet and creates 3 separate 3D Plotly figures
+    (hard / soft / pair) with:
+      X = dealer upcard
+      Y = player hand (category-specific labels)
+      Z = best_ev
+
+    Returns a dict: {"hard": fig_hard, "soft": fig_soft, "pair": fig_pair}
+    """
+
+    df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
+
+    required = {"category", "label", "dealer_up", "best_ev"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in '{sheet_name}': {sorted(missing)}")
+
+    def card_to_num(v) -> int:
+        # supports 2..10 and 'A' (Ace -> 11)
+        if pd.isna(v):
+            raise ValueError("Found NaN in dealer_up/label.")
+        s = str(v).strip().upper()
+        if s == "A":
+            return 11
+        return int(s)
+
+    def num_to_card(n: int) -> str:
+        return "A" if n == 11 else str(int(n))
+
+    dealer_order = list(range(2, 11)) + [11]
+    dealer_tickvals = dealer_order
+    dealer_ticktext = [str(x) for x in range(2, 11)] + ["A"]
+
+    def make_surface_for_category(category: str) -> go.Figure:
+        d = df[df["category"].astype(str).str.lower() == category].copy()
+        if d.empty:
+            raise ValueError(f"No rows found for category='{category}' in '{sheet_name}'.")
+
+        d["dealer_up_num"] = d["dealer_up"].map(card_to_num)
+
+        if category == "hard":
+            # hard totals 5..20
+            y_order = list(range(5, 21))
+            d["label_num"] = d["label"].map(lambda x: int(str(x).strip()))
+            y_tickvals = y_order
+            y_ticktext = [str(y) for y in y_order]
+            y_title = "Player hard total"
+        elif category == "soft":
+            # soft totals 13..20 (A2..A9)
+            y_order = list(range(13, 21))
+            d["label_num"] = d["label"].map(lambda x: int(str(x).strip()))
+            y_tickvals = y_order
+            y_ticktext = [f"A{t-11}" for t in y_order]  # 13->A2 ... 20->A9
+            y_title = "Player soft hand"
+        elif category == "pair":
+            # pairs 2..10 and A (mapped to 11)
+            y_order = list(range(2, 11)) + [11]
+            d["label_num"] = d["label"].map(card_to_num)
+            y_tickvals = y_order
+            y_ticktext = [f"{num_to_card(v)},{num_to_card(v)}" for v in y_order]
+            y_title = "Player pair"
+        else:
+            raise ValueError(f"Unknown category '{category}'.")
+
+        # Pivot to a full grid (rows=y, cols=x)
+        z_df = (
+            d.pivot(index="label_num", columns="dealer_up_num", values="best_ev")
+            .reindex(index=y_order, columns=dealer_order)
+        )
+
+        if z_df.isna().any().any():
+            # If your table ever becomes sparse, you can switch to Scatter3d instead.
+            raise ValueError(
+                f"Category '{category}' has missing (label, dealer_up) combinations; cannot build a full surface."
+            )
+
+        x = np.array(dealer_order)
+        y = np.array(y_order)
+        z = z_df.to_numpy()
+
+        # Build hover labels (show A instead of 11; show pair/soft labels nicely)
+        X, Y = np.meshgrid(x, y)
+        dealer_lbl = np.vectorize(num_to_card)(X)
+
+        if category == "soft":
+            player_lbl = np.vectorize(lambda t: f"A{int(t)-11}")(Y)
+        elif category == "pair":
+            player_lbl = np.vectorize(lambda r: f"{num_to_card(int(r))},{num_to_card(int(r))}")(Y)
+        else:  # hard
+            player_lbl = np.vectorize(lambda t: str(int(t)))(Y)
+
+        customdata = np.dstack([dealer_lbl, player_lbl])
+
+        zmin = float(np.nanmin(z))
+        zmax = float(np.nanmax(z))
+        absmax = max(abs(zmin), abs(zmax))
+
+        fig = go.Figure(
+            data=go.Surface(
+                x=x,
+                y=y,
+                z=z,
+                colorscale="delta",
+                cmin=-absmax + 0.1,
+                cmax=absmax ,
+                cmid=0.0,
+                customdata=customdata,
+                hovertemplate=(
+                    "Dealer: %{customdata[1]}<br>"
+                    "Player: %{customdata[0]}<br>"
+                    "best_ev: %{z:.6f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        fig.update_layout(
+            title=f"Best EV surface ({category})",
+            scene=dict(
+                xaxis=dict(
+                    title="Dealer upcard",
+                    tickmode="array",
+                    tickvals=dealer_tickvals,
+                    ticktext=dealer_ticktext,
+                ),
+                yaxis=dict(
+                    title=y_title,
+                    tickmode="array",
+                    tickvals=y_tickvals,
+                    ticktext=y_ticktext,
+                ),
+                zaxis=dict(title="best_ev"),
+            ),
+            margin=dict(l=0, r=0, b=0, t=40),
+        )
+        return fig
+
+    figs = {cat: make_surface_for_category(cat) for cat in ("hard", "soft", "pair")}
+
+    if show:
+        for fig in figs.values():
+            fig.show()
+
+    return figs
+
 if __name__ == "__main__":
-    eval_history_path = r"sim_results\run_20260106_1651\eval_history.xlsx"
+    eval_history_path = r"sim_results\Reference_run\eval_history.xlsx"
     return_plot = plot_eval_return(eval_history_path)
     policy_flip_plot = plot_eval_flip_rate_with_abs_flips(eval_history_path)
+    state_landscape_plots = plot_state_values(r"sim_results\Reference_run\initial_decision_QN_20260106_1651.xlsx")
+    for plot in state_landscape_plots:
+        plot.show()

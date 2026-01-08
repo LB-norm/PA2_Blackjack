@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple
 
 import pandas as pd
 from pandas.io.formats.style import Styler
+from export_plots import plot_eval_return, plot_eval_flip_rate_with_abs_flips
 
 Action = str
 
@@ -193,7 +194,10 @@ def export_results(save_dir: str, result: Dict[str, Any], up_cols: List[Any] | N
     write_grid_xlsx("soft", soft_grid, list(range(13, 22)))
     write_grid_xlsx("pairs", pair_grid, [str(x) for x in [2, 3, 4, 5, 6, 7, 8, 9, 10, "A"]])
     export_initial_decision_qn_tables(run_dir, Q, N, rules, up_cols=up_cols)
-    export_eval_history_xlsx(results=result, save_path=os.path.join(run_dir, "eval_history.xlsx"))
+    eval_history_path = save_path=os.path.join(run_dir, "eval_history.xlsx")
+    export_eval_history_xlsx(results=result, save_path=eval_history_path)
+    _ = plot_eval_return(eval_history_path)
+    _ = plot_eval_flip_rate_with_abs_flips(eval_history_path)
     return run_dir
 
 def export_initial_decision_qn_tables(
