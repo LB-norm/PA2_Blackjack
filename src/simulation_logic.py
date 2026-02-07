@@ -31,7 +31,7 @@ def run_blackjack_mc(
     Q: Dict[Tuple, Dict[Action, float]] = {}
     N: Dict[Tuple, Dict[Action, int]] = {}
     
-    def get_epsilon_state(sk, N0=1000.0, eps_max=0.3, eps_min=0.1):
+    def get_epsilon_state(sk, N0=1000.0, eps_max=0.3, eps_min=0):
         N_s = sum(N.get(sk, {}).values())
         e = N0 / (N0 + N_s)
         return max(eps_min, min(eps_max, e))
@@ -73,8 +73,8 @@ def run_blackjack_mc(
         if len(acts) == 1:
             return acts[0]
         eps = get_epsilon_state(sk)
-        if after_split:   #be greedy if after split
-            eps = min(get_epsilon_state(sk), 0.1)
+        # if after_split:   #be greedy if after split
+        #     eps = min(get_epsilon_state(sk), 0.1)
         if rng.random() < eps:
             return rng.choice(acts)
         qsa = Q.get(sk, {})

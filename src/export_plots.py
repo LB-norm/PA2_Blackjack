@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
+import matplotlib.pyplot as plt
 
 def _nice_log_ticks(x_min: float, x_max: float) -> list[int]:
     """1-2-5 log ticks between x_min and x_max (inclusive)."""
@@ -38,7 +39,7 @@ def _fmt_si(n: float) -> str:
 def plot_eval_return(
     eval_history_xlsx_path: str,
     *,
-    title: str = "Greedy mean return vs training episode",
+    title: str = "Greedy mean Return vs Episode",
     show_ci: bool = True,
     ci_z: float = 1.96,  # 95% CI if stderr_return is present
 ) -> go.Figure:
@@ -90,7 +91,7 @@ def plot_eval_return(
     ))
 
     target = -0.43286  # in percent units (since y is already %)
-    target_label = f"Reference ({target:.3f}%)"
+    target_label = f"Referenz ({target:.3f}%)"
 
     fig.add_trace(go.Scatter(
         x=[x.min(), x.max()],
@@ -103,8 +104,8 @@ def plot_eval_return(
 
     fig.update_layout(
         title=title,
-        xaxis_title="Training episode (log scale)",
-        yaxis_title="Mean return (%)",
+        xaxis_title="Episode (logarithmisch)",
+        yaxis_title="Mean Return (%)",
         margin=dict(l=60, r=30, t=60, b=55),
         legend=dict(orientation="v", yanchor="bottom", y=0.1, xanchor="right", x=0.99, borderwidth=1),
     )
@@ -155,7 +156,7 @@ def _bar_widths_for_log_x(x: np.ndarray, frac_of_median_spacing: float = 0.70) -
 def plot_eval_flip_rate_with_abs_flips(
     eval_history_xlsx_path: str,
     *,
-    title: str = "Policy flip rate & number of flips vs training episode",
+    title: str = "Policy Fliprate & Anzahl Flips vs Episode",
     n_states: int = 330,
     bar_width_frac: float = 0.70,
 ) -> go.Figure:
@@ -201,7 +202,7 @@ def plot_eval_flip_rate_with_abs_flips(
         x=x,
         y=abs_flips,
         width=widths,          # key change
-        name="Absolute flips",
+        name="Anzahl Flips",
         opacity=0.55,
         yaxis="y2",
         hovertemplate="episode=%{x:.0f}<br>abs_flips=%{y}<extra></extra>",
@@ -211,22 +212,22 @@ def plot_eval_flip_rate_with_abs_flips(
         x=x,
         y=flip_pct,
         mode="lines+markers",
-        name="Flip rate",
+        name="Fliprate",
         hovertemplate="episode=%{x:.0f}<br>flip_rate=%{y:.3f}%<extra></extra>",
     ))
 
     fig.update_layout(
         title=title,
-        xaxis_title="Training episode (log scale)",
+        xaxis_title="Episode (logarithmisch)",
         yaxis=dict(
-            title="Flip rate (%)",
+            title="Fliprate (%)",
             ticksuffix="%",
             rangemode="tozero",
             zeroline=True,
             zerolinewidth=1,
         ),
         yaxis2=dict(
-            title=f"Absolute flips (out of {denom_for_title})" if denom_for_title else "Absolute flips",
+            title=f"Anzahl Flips (von {denom_for_title})" if denom_for_title else "Absolute flips",
             overlaying="y",
             side="right",
             rangemode="tozero",
@@ -369,7 +370,7 @@ def plot_state_values(
         )
 
         fig.update_layout(
-            title=f"Best EV surface ({category})",
+            title=f"EV Landschaft ({category})",
             scene=dict(
                 xaxis=dict(
                     title="Dealer upcard",
@@ -397,10 +398,48 @@ def plot_state_values(
 
     return figs
 
+def plot_epsilon(N0, eps_max, eps_min):
+    Ns = np.arange(0, 22001)  # N_s = 0..12000
+    e = N0 / (N0 + Ns)
+    eps = np.maximum(eps_min, np.minimum(eps_max, e))
+
+    # Breakpoints (integers, because N_s counts visits)
+    Ns_break1 = int(np.floor(N0 * (1/eps_max - 1)))  # 2333  -> constant eps_max up to here
+    Ns_break2 = int(N0 * (1/eps_min - 1))            # 9000  -> constant eps_min from here on
+
+    seg1 = Ns <= Ns_break1
+    seg2 = (Ns >= Ns_break1 + 1) & (Ns <= Ns_break2 - 1)  # 2334..8999
+    seg3 = Ns >= Ns_break2
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+
+    ax.plot(Ns[seg1], eps[seg1], linewidth=2.5, color="tab:blue",   label=f"N_s ≤ {Ns_break1} (eps_max)")
+    ax.plot(Ns[seg2], eps[seg2], linewidth=2.5, color="tab:orange", label=f"{Ns_break1+1} ≤ N_s ≤ {Ns_break2-1} (decay)")
+    ax.plot(Ns[seg3], eps[seg3], linewidth=2.5, color="tab:green",  label=f"N_s ≥ {Ns_break2} (eps_min)")
+
+    # Visual markers for boundaries
+    ax.axvline(Ns_break1 + 1, linestyle="--", linewidth=1.5, color="0.35")
+    ax.axvline(Ns_break2,     linestyle="--", linewidth=1.5, color="0.35")
+
+    ax.set_title(f"Epsilon(N_s) mit N0={N0}, eps_max={eps_max}, eps_min={eps_min}")
+    ax.set_xlabel("N_s")
+    ax.set_ylabel("Epsilon")
+    ax.set_xlim(Ns[0], Ns[-1])
+    ax.set_ylim(0, 0.35)
+    ax.grid(True, alpha=0.5)
+    ax.legend(frameon=True)
+
+    plt.show()
+
+    
 if __name__ == "__main__":
-    eval_history_path = r"sim_results\Reference_run\eval_history.xlsx"
+    plot_epsilon(N0=1000, eps_max=0.3, eps_min=0.05)
+    eval_history_path = r"sim_results\new_fav_0,05min_no_hard_eps\eval_history.xlsx"
     return_plot = plot_eval_return(eval_history_path)
+    return_plot.write_html("EV_plot.html", include_plotlyjs="cdn", full_html=True)
     policy_flip_plot = plot_eval_flip_rate_with_abs_flips(eval_history_path)
-    state_landscape_plots = plot_state_values(r"sim_results\Reference_run\initial_decision_QN_20260106_1651.xlsx")
-    for plot in state_landscape_plots:
-        plot.show()
+    policy_flip_plot.write_html("Fliprate_plot.html", include_plotlyjs="cdn", full_html=True)
+    state_landscape_plots = plot_state_values(r"sim_results\new_fav_0,05min_no_hard_eps\initial_decision_QN_20260118_1859.xlsx")
+    for plot in state_landscape_plots.values():
+        title = plot.layout.title.text
+        plot.write_html(f"{title}.html", include_plotlyjs="cdn", full_html=True)
